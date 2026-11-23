@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# setup_reality_selfsteal.sh  v3
+# setup_reality_selfsteal.sh  v4
 # Debian 12/13：Cloudflare 自动加 A 记录 + UFW + BBR + DNS 验证证书
 #               + 博客(Nginx 127.0.0.1:8443) + 3x-ui(全自动安装) + 自检
 #
@@ -18,7 +18,14 @@
 #   SERVER_IP    手动指定公网 IP（默认自动探测）
 #   FORCE_XUI=1  已装过 3x-ui 也重新安装
 #   SCRIPT_URL   脚本网址，仅用于让结尾提示显示完整命令
+#
+# 更新日志（每次修改：版本号 +1，并在这里补一行）
+#   v4  3x-ui 自动应答改为按提示关键词匹配，等待时间 120 秒 -> 15 分钟；运行时打印版本号
+#   v3  开头只问 CF Token 和域名；Zone ID 自动获取；3x-ui 用 expect 自动应答；结尾输出面板信息
+#   v2  加入 CF 自动加 A 记录、自检(check)、收紧防火墙(harden)
+#   v1  初版：UFW + BBR + 证书 + 博客 + 3x-ui
 # ============================================================================
+SCRIPT_VERSION="v4"
 set -u -o pipefail
 
 PASS=0; WARN=0; FAIL=0
@@ -29,6 +36,7 @@ step() { echo; echo "==> $*"; }
 die()  { echo "错误: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "请用 root 运行"
+echo "setup_reality_selfsteal.sh ${SCRIPT_VERSION}"
 
 ACME=/root/.acme.sh/acme.sh
 XUI_BIN=/usr/local/x-ui/x-ui
@@ -232,8 +240,8 @@ cmd_harden() {
 }
 
 # ---------------------------------------------------------------------------
-# 3x-ui 全自动安装：用 expect 按提示自动应答
-#   数据库=SQLite(回车默认) / 面板端口=随机(n) / SSL=3(Custom) / 域名 / 证书路径
+# 3x-ui 全自动安装：用 expect 按提示自动应答（提示原文已按 3x-ui 实际输出核对）
+#   数据库=SQLite(1) / 面板端口=随机(n) / SSL=3(Custom) / 域名 / 证书路径 / 私钥路径
 #   遇到认不出的提示，会交还给你手动输入
 # ---------------------------------------------------------------------------
 install_xui_auto() {
@@ -243,21 +251,29 @@ install_xui_auto() {
     || die "下载 3x-ui 安装脚本失败"
 
   cat > "$exp" <<'EXPECT_EOF'
-set timeout 120
+# 3x-ui 安装脚本的实际提示（按原文匹配，不依赖行尾，避免颜色代码干扰）：
+#   Choose [1]:                                   数据库选择
+#   customize the Panel Port settings ... [y/N]:  自定义面板端口
+#   Choose an option (default 2 for IP):          SSL 方式
+#   Please enter domain name certificate issued for:
+#   Input certificate path (keywords: .crt / fullchain):
+#   Input private key path (keywords: .key / privatekey):
+# 安装包要先下载再解压，第一个提示可能要等几分钟，所以超时放宽到 15 分钟
+set timeout 900
 set domain $env(XUI_DOMAIN)
 set cert   $env(XUI_CERT)
 set key    $env(XUI_KEY)
 log_file -noappend $env(XUI_LOG)
 spawn bash $env(XUI_INSTALLER)
 expect {
-  -re {(?i)choose[^\n]*\[1\][^\n]*:\s*$}   { send "1\r"; exp_continue }
-  -re {(?i)customize[^\n]*port[^\n]*:\s*$} { send "n\r"; exp_continue }
-  -re {(?i)choose an option[^\n]*:\s*$}    { send "3\r"; exp_continue }
-  -re {(?i)domain name[^\n]*:\s*$}         { send "$domain\r"; exp_continue }
-  -re {(?i)private[^\n]*:\s*$}             { send "$key\r"; exp_continue }
-  -re {(?i)(public|certificate|fullchain|cert)[^\n]*(path|file|key)[^\n]*:\s*$} { send "$cert\r"; exp_continue }
+  -re {Choose \[1\]}                          { send "1\r"; exp_continue }
+  -re {customize the Panel Port}              { send "n\r"; exp_continue }
+  -re {Choose an option}                      { send "3\r"; exp_continue }
+  -re {domain name certificate issued for}    { send "$domain\r"; exp_continue }
+  -re {Input certificate path}                { send "$cert\r"; exp_continue }
+  -re {Input private key path}                { send "$key\r"; exp_continue }
   timeout {
-    puts "\n\[自动应答\] 120 秒内没有识别到已知提示，请按上面的提示手动输入："
+    puts "\n\[自动应答\] 15 分钟内没有识别到已知提示，请按上面的提示手动输入："
     interact
   }
   eof { }
